@@ -1,0 +1,9 @@
+praw
+feedparser
+sentence-transformers
+gensim
+torch
+scikit-learn
+matplotlib
+ollama
+pandas
