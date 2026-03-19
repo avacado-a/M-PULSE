@@ -2,8 +2,10 @@ import torch
 import torch.nn as nn
 
 class MPulseNet(nn.Module):
-    def __init__(self, macro_seq_len=104, micro_seq_len=60, feature_dim=300):
+    def __init__(self, macro_seq_len=104, micro_seq_len=60, feature_dim=300, use_macro=True, use_micro=True):
         super(MPulseNet, self).__init__()
+        self.use_macro = use_macro
+        self.use_micro = use_micro
         
         # Pathway A: Macro (LSTM)
         self.macro_lstm = nn.LSTM(input_size=feature_dim, hidden_size=64, batch_first=True)
@@ -19,21 +21,26 @@ class MPulseNet(nn.Module):
         self.fc2 = nn.Linear(32, 1)
 
     def forward(self, macro_x, micro_x):
-        # Pathway A
-        _, (macro_hidden, _) = self.macro_lstm(macro_x)
-        macro_out = macro_hidden[-1] # Shape: (batch, 64)
-        
-        # Pathway B
-        micro_x = micro_x.permute(0, 2, 1) # Shape: (batch, 300, 60)
-        micro_conv_out = self.micro_relu(self.micro_conv(micro_x))
-        micro_conv_out = micro_conv_out.permute(0, 2, 1) # Shape: (batch, 60, 128)
-        _, (micro_hidden, _) = self.micro_lstm(micro_conv_out)
-        micro_out = micro_hidden[-1] # Shape: (batch, 64)
+        # Zero out pathways if disabled
+        if not self.use_macro:
+            macro_out = torch.zeros(macro_x.size(0), 64).to(macro_x.device)
+        else:
+            _, (macro_hidden, _) = self.macro_lstm(macro_x)
+            macro_out = macro_hidden[-1]
+            
+        if not self.use_micro:
+            micro_out = torch.zeros(micro_x.size(0), 64).to(micro_x.device)
+        else:
+            micro_x = micro_x.permute(0, 2, 1)
+            micro_conv_out = self.micro_relu(self.micro_conv(micro_x))
+            micro_conv_out = micro_conv_out.permute(0, 2, 1)
+            _, (micro_hidden, _) = self.micro_lstm(micro_conv_out)
+            micro_out = micro_hidden[-1]
         
         # Fusion
-        fused = torch.cat((macro_out, micro_out), dim=1) # Shape: (batch, 128)
+        fused = torch.cat((macro_out, micro_out), dim=1)
         x = self.relu(self.fc1(fused))
-        return self.fc2(x) # Shape: (batch, 1)
+        return self.fc2(x)
 
 if __name__ == "__main__":
     print("Running The Dummy Tensor Test...")

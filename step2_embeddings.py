@@ -6,7 +6,7 @@ from gensim.models import Word2Vec
 import re
 import os
 
-def filter_and_embed(topic="kraken"):
+def filter_and_embed(topic="kraken", save_dir="."):
     print("Loading data from SQLite...")
     if not os.path.exists('m_pulse.db'):
         print("m_pulse.db not found. Run step1_ingestion.py first.")
@@ -55,14 +55,16 @@ def filter_and_embed(topic="kraken"):
     tokenized_data.append(["kraken", "motor", "firmware", "torque"])
     
     model = Word2Vec(sentences=tokenized_data, vector_size=100, window=5, min_count=1, workers=4)
-    model.save("current_context.model")
-    print("Saved current_context.model")
+    model_path = os.path.join(save_dir, "current_context.model")
+    model.save(model_path)
+    print(f"Saved {model_path}")
 
-def test_model():
-    if not os.path.exists("current_context.model"):
+def test_model(save_dir="."):
+    model_path = os.path.join(save_dir, "current_context.model")
+    if not os.path.exists(model_path):
         return
     print("\nEvaluating model...")
-    model = Word2Vec.load("current_context.model")
+    model = Word2Vec.load(model_path)
     test_word = "kraken"
     
     if test_word in model.wv.key_to_index:
@@ -72,5 +74,7 @@ def test_model():
             print(f"  {word}: {score:.4f}")
 
 if __name__ == "__main__":
-    filter_and_embed("FRC Kraken Motors")
+    import sys
+    topic = sys.argv[1] if len(sys.argv) > 1 else "FRC Kraken Motors"
+    filter_and_embed(topic)
     test_model()

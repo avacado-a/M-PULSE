@@ -8,9 +8,9 @@ def rag_explanation(predicted_spike, keywords):
         prompt = (f"The system predicts a spike. Here are the top keywords from today: "
                   f"[{', '.join(keywords)}]. Write a two-sentence explanation of what is happening.")
         
-        print(f"Sending prompt to Ollama (phi3:mini):\n{prompt}\n")
+        print(f"Sending prompt to Ollama (gemma3:1b):\n{prompt}\n")
         try:
-            response = ollama.chat(model='phi3:mini', messages=[
+            response = ollama.chat(model='gemma3:1b', messages=[
                 {'role': 'user', 'content': prompt}
             ])
             explanation = response['message']['content']
@@ -21,7 +21,7 @@ def rag_explanation(predicted_spike, keywords):
             
         except Exception as e:
             print(f"Error querying Ollama: {e}")
-            print("Ensure Ollama is installed locally and the 'phi3:mini' model is pulled ('ollama run phi3:mini').")
+            print("Ensure Ollama is installed locally and the 'gemma3:1b' model is pulled ('ollama run gemma3:1b').")
     else:
         print("No significant spike detected. Routine monitoring continues.")
 

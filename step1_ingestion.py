@@ -1,11 +1,17 @@
 import sqlite3
 import time
 import feedparser
-import praw
 import os
 import re
+import urllib.parse
+from atproto import Client
+from datetime import datetime
 
 DB_NAME = 'm_pulse.db'
+
+# YOUR BLUESKY CREDENTIALS
+BSKY_HANDLE = 'sparik7633.bsky.social'
+BSKY_APP_PASSWORD = 'sqxf-cuyn-cyes-mftn'
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -37,7 +43,7 @@ def init_db():
 
 def clean_html(raw_html):
     cleanr = re.compile('<.*?>')
-    return re.sub(cleanr, '', raw_html)
+    return re.sub(cleanr, '', str(raw_html))
 
 def scrape_macro(topic):
     print(f"Scraping Macro Data (RSS Feeds) for topic: {topic}")
@@ -53,7 +59,7 @@ def scrape_macro(topic):
     for feed_url in rss_feeds:
         print(f"Fetching from {feed_url}...")
         feed = feedparser.parse(feed_url)
-        for entry in feed.entries[:20]: # limit to recent
+        for entry in feed.entries[:20]:
             title = entry.get('title', '')
             link = entry.get('link', '')
             published = entry.get('published', '')
@@ -68,35 +74,49 @@ def scrape_macro(topic):
     conn.close()
     print("Macro data saved.")
 
-def scrape_micro(topic, duration=60):
-    print(f"Scraping Micro Data (Reddit) for topic: {topic}")
-    CLIENT_ID = os.getenv('REDDIT_CLIENT_ID', 'YOUR_CLIENT_ID')
-    CLIENT_SECRET = os.getenv('REDDIT_CLIENT_SECRET', 'YOUR_CLIENT_SECRET')
-    USER_AGENT = os.getenv('REDDIT_USER_AGENT', 'MPulseBot/0.1')
+def scrape_micro_bluesky(topic, limit=50):
+    print(f"Scraping Micro Data (Bluesky) for topic: {topic}")
+    client = Client()
     
     try:
-        reddit = praw.Reddit(
-            client_id=CLIENT_ID,
-            client_secret=CLIENT_SECRET,
-            user_agent=USER_AGENT
-        )
+        # Authenticate with Bluesky
+        print(f"Logging in to Bluesky as {BSKY_HANDLE}...")
+        client.login(BSKY_HANDLE, BSKY_APP_PASSWORD)
         
-        subreddits = reddit.subreddit("FRC+robotics")
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
-        print(f"Simulating a {duration} seconds stream by pulling recent posts...")
-        for submission in subreddits.new(limit=50):
-            clean_text = submission.title + " " + getattr(submission, 'selftext', '')
+        # Bluesky search for the topic
+        print(f"Searching Bluesky for '{topic}'...")
+        params = {'q': topic, 'limit': limit}
+        response = client.app.bsky.feed.search_posts(params=params)
+        
+        count = 0
+        for post in response.posts:
+            author_handle = post.author.handle
+            text = post.record.text
+            created_at = post.record.created_at # ISO string (e.g., 2024-03-19T14:00:00Z)
+            
+            # Convert ISO to timestamp for database consistency
+            try:
+                # Handle Z and other offsets
+                dt_str = created_at.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(dt_str)
+                ts = dt.timestamp()
+            except Exception as e:
+                ts = time.time()
+
             cursor.execute('''
                 INSERT INTO micro_data (topic, author, clean_text, created_utc, source, type)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', (topic, str(submission.author), clean_text, submission.created_utc, "reddit", "submission"))
+            ''', (topic, author_handle, text, ts, "bluesky", "post"))
+            count += 1
+            
         conn.commit()
+        conn.close()
+        print(f"Bluesky data saved ({count} posts).")
     except Exception as e:
-        print(f"Reddit Scraper Error (Expected if API keys missing): {e}")
-
-    print("Micro data scraping completed.")
+        print(f"Bluesky Scraper Error: {e}")
 
 if __name__ == "__main__":
     import sys
@@ -104,5 +124,5 @@ if __name__ == "__main__":
     print(f"Initializing Data Ingestion Pipeline for topic: {topic}")
     init_db()
     scrape_macro(topic)
-    scrape_micro(topic, duration=60)
+    scrape_micro_bluesky(topic)
     print("Step 1 complete. Check m_pulse.db")
