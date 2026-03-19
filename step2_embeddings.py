@@ -54,7 +54,7 @@ def filter_and_embed(topic="kraken", save_dir="."):
     # inject target word for the test
     tokenized_data.append(["kraken", "motor", "firmware", "torque"])
     
-    model = Word2Vec(sentences=tokenized_data, vector_size=100, window=5, min_count=1, workers=4)
+    model = Word2Vec(sentences=tokenized_data, vector_size=300, window=5, min_count=1, workers=4)
     model_path = os.path.join(save_dir, "current_context.model")
     model.save(model_path)
     print(f"Saved {model_path}")
