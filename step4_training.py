@@ -24,7 +24,7 @@ def log_telemetry(run_type, epoch, loss, vram, epoch_time):
         writer = csv.writer(f)
         writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), run_type, epoch, f"{loss:.6f}", f"{vram:.4f}", f"{epoch_time:.2f}"])
 
-def run_experiment(run_type, use_macro, use_micro, X_macro, X_micro, Y, epochs=50):
+def run_experiment(run_type, use_macro, use_micro, X_macro, X_micro, Y, epochs=100):
     # Create Dynamic Run Folder
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_id = f"{run_type}_{timestamp}"
@@ -35,6 +35,12 @@ def run_experiment(run_type, use_macro, use_micro, X_macro, X_micro, Y, epochs=5
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.01)
     
+    # --- TRAIN/TEST SPLIT (Fixing Data Leakage) ---
+    split_idx = int(len(Y) * 0.75) 
+    X_mac_train, X_mac_test = X_macro[:split_idx], X_macro[split_idx:]
+    X_mic_train, X_mic_test = X_micro[:split_idx], X_micro[split_idx:]
+    Y_train, Y_test = Y[:split_idx], Y[split_idx:]
+    
     vram_usage = []
     losses = []
     
@@ -43,22 +49,21 @@ def run_experiment(run_type, use_macro, use_micro, X_macro, X_micro, Y, epochs=5
         start_time = time.time()
         model.train()
         optimizer.zero_grad()
-        outputs = model(X_macro, X_micro)
-        loss = criterion(outputs, Y)
+        
+        # Train ONLY on the Training Set
+        outputs = model(X_mac_train, X_mic_train)
+        loss = criterion(outputs, Y_train)
         loss.backward()
         optimizer.step()
         
         epoch_time = time.time() - start_time
         losses.append(loss.item())
         
-        # Track VRAM
         vram = torch.cuda.max_memory_allocated() / (1024**3) if torch.cuda.is_available() else 0.01
         vram_usage.append(vram)
-        
-        # Log to Master Telemetry CSV
         log_telemetry(run_type, epoch + 1, loss.item(), vram, epoch_time)
         
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 20 == 0:
             print(f"  Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.6f}")
 
     # Save Model Weights
@@ -66,9 +71,10 @@ def run_experiment(run_type, use_macro, use_micro, X_macro, X_micro, Y, epochs=5
     
     model.eval()
     with torch.no_grad():
-        predictions = model(X_macro, X_micro).numpy().flatten()
+        # Evaluate ONLY on the unseen Test Set
+        predictions = model(X_mac_test, X_mic_test).numpy().flatten()
         
-    mse = mean_squared_error(Y.numpy().flatten(), predictions)
+    mse = mean_squared_error(Y_test.numpy().flatten(), predictions)
     
     # Save Learning Curve Plot
     plt.figure(figsize=(10, 5))
@@ -81,19 +87,19 @@ def run_experiment(run_type, use_macro, use_micro, X_macro, X_micro, Y, epochs=5
     plt.savefig(os.path.join(run_dir, "learning_curve.png"))
     plt.close()
 
-    return predictions, mse, vram_usage, run_dir
+    return predictions, mse, vram_usage, run_dir, split_idx
 
-# Scaffolding for directories
+# Scaffolding
 os.makedirs("runs", exist_ok=True)
 init_telemetry()
 
 # Generate Realistic Data
 print("Generating experimental data for Ablation Study...")
-time_steps = 300
-t = np.linspace(0, 15, time_steps)
+time_steps = 400
+t = np.linspace(0, 20, time_steps)
 seasonal_trend = np.sin(t * 0.5) 
 sudden_spike = np.zeros(time_steps)
-sudden_spike[200:210] = 2.0 
+sudden_spike[320:330] = 2.0 # Spike happens in the "future" (test set)
 actual_data = seasonal_trend + sudden_spike + np.random.normal(0, 0.05, time_steps)
 
 X_macro_list, X_micro_list, Y_list = [], [], []
@@ -110,7 +116,7 @@ X_macro = torch.tensor(np.array(X_macro_list), dtype=torch.float32)
 X_micro = torch.tensor(np.array(X_micro_list), dtype=torch.float32)
 Y = torch.tensor(np.array(Y_list), dtype=torch.float32).view(-1, 1)
 
-print("\n--- Starting Automated Research Runs ---")
+print("\n--- Starting Automated Research Runs (with Train/Test Split) ---")
 results = {}
 
 # Run 1: Micro-Only
@@ -122,23 +128,37 @@ results['Macro-Only'] = run_experiment("Macro_Only", True, False, X_macro, X_mic
 # Run 3: Dual-Stream
 results['Dual-Stream'] = run_experiment("Dual_Stream", True, True, X_macro, X_micro, Y)
 
-# Final Accuracy Plot (Cross-Run)
-plt.figure(figsize=(12, 6))
+# Final Accuracy Plot with Data Alignment
+plt.figure(figsize=(14, 7))
 actuals = Y.numpy().flatten()
-plt.plot(actuals, label='Actual Data', color='black', linewidth=2)
-plt.plot(results['Micro-Only'][0], label='Run 1 (Micro-Only)', linestyle='dotted')
-plt.plot(results['Macro-Only'][0], label='Run 2 (Macro-Only)', linestyle='dashed')
-plt.plot(results['Dual-Stream'][0], label='Run 3 (Dual-Stream)', color='green', linewidth=2)
-plt.title("Ablation Study: Trajectory Comparison")
+plt.plot(actuals, label='Actual Data (Full)', color='black', alpha=0.3)
+
+# Add Vertical Line for Train/Test Cutoff
+split_idx = results['Dual-Stream'][4]
+plt.axvline(x=split_idx, color='red', linestyle='--', label='Train/Test Cutoff')
+
+for name, (pred, mse, vram, r_dir, s_idx) in results.items():
+    # Pad predictions with NaN to align with the original timeline
+    padded_preds = np.full(len(actuals), np.nan)
+    padded_preds[s_idx:] = pred
+    
+    color = 'green' if 'Dual' in name else None
+    linewidth = 2.5 if 'Dual' in name else 1.5
+    plt.plot(padded_preds, label=f'{name} (MSE: {mse:.4f})', linewidth=linewidth, color=color)
+
+plt.title("M-PULSE: Forecasting Unseen Future Data (Ablation Study)")
+plt.xlabel("Time Step")
+plt.ylabel("Sentiment / Trend Volume")
 plt.legend()
+plt.grid(True, alpha=0.2)
 plt.savefig("final_research_comparison.png")
-print("\nFinal comparison chart saved to final_research_comparison.png")
+print("\nFinal aligned comparison chart saved to final_research_comparison.png")
 
 # Final MSE Table
-print("\n" + "="*40)
-print(f"{'Configuration':<20} | {'MSE':<10}")
-print("-" * 40)
-for name, (pred, mse, vram, r_dir) in results.items():
-    print(f"{name:<20} | {mse:.6f}")
-    print(f"  -> Saved in: {r_dir}")
-print("="*40)
+print("\n" + "="*60)
+print(f"{'Configuration':<25} | {'Test MSE':<15}")
+print("-" * 60)
+for name, (pred, mse, vram, r_dir, s_idx) in results.items():
+    print(f"{name:<25} | {mse:.6f}")
+    print(f"  -> Data saved in: {r_dir}")
+print("="*60)
