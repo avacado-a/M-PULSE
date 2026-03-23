@@ -6,7 +6,7 @@ from gensim.models import Word2Vec
 import re
 import os
 
-def filter_and_embed(topic="kraken", save_dir="."):
+def filter_and_embed(topic="Middle East", save_dir="."):
     print("Loading data from SQLite...")
     if not os.path.exists('m_pulse.db'):
         print("m_pulse.db not found. Run step1_ingestion.py first.")
@@ -75,6 +75,6 @@ def test_model(save_dir="."):
 
 if __name__ == "__main__":
     import sys
-    topic = sys.argv[1] if len(sys.argv) > 1 else "FRC Kraken Motors"
+    topic = sys.argv[1] if len(sys.argv) > 1 else "Middle East"
     filter_and_embed(topic)
     test_model()

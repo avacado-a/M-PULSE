@@ -7,173 +7,140 @@ from sklearn.metrics import mean_squared_error
 from step3_model import MPulseNet
 from gensim.models import Word2Vec
 import sqlite3
-import time
+import pandas as pd
 import os
-import csv
 import re
 from datetime import datetime
 
-# DEVICE CONFIGURATION
+# DEVICE
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
 
-# RESEARCH TELEMETRY LOG
-TELEMETRY_FILE = 'research_telemetry_log.csv'
-
-def init_telemetry():
-    if not os.path.exists(TELEMETRY_FILE):
-        with open(TELEMETRY_FILE, mode='w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['Timestamp', 'Run_Type', 'Epoch', 'Training_Loss', 'Val_Loss', 'Peak_VRAM_GB', 'Epoch_Time_Sec'])
-
-def log_telemetry(run_type, epoch, train_loss, val_loss, vram, epoch_time):
-    with open(TELEMETRY_FILE, mode='a', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), run_type, epoch, f"{train_loss:.6f}", f"{val_loss:.6f}", f"{vram:.4f}", f"{epoch_time:.2f}"])
-
-def text_to_vector_seq(text_list, w2v_model, seq_len, feature_dim=300):
-    sequences = []
+def get_day_vector(text_list, w2v_model, feature_dim=300):
+    """Averages all text for a single day into one meaningful vector."""
+    all_vecs = []
     for text in text_list:
-        words = re.sub(r'[^\w\s]', '', str(text).lower()).split()
+        words = str(text).lower().split()
         vectors = [w2v_model.wv[w] for w in words if w in w2v_model.wv]
-        if len(vectors) == 0:
-            vectors = [np.zeros(feature_dim)]
-        if len(vectors) < seq_len:
-            padding = [np.zeros(feature_dim)] * (seq_len - len(vectors))
-            vectors = vectors + padding
-        else:
-            vectors = vectors[:seq_len]
-        sequences.append(np.array(vectors))
-    return np.array(sequences)
+        if vectors:
+            all_vecs.append(np.mean(vectors, axis=0))
+    return np.mean(all_vecs, axis=0) if all_vecs else np.zeros(feature_dim)
 
-def load_real_data(db_name='m_pulse.db', model_path='current_context.model'):
-    if not os.path.exists(db_name) or not os.path.exists(model_path):
-        raise FileNotFoundError("Database or Word2Vec model missing. Run steps 1 and 2.")
-    conn = sqlite3.connect(db_name)
-    macro_data = conn.execute("SELECT clean_text FROM macro_data").fetchall()
-    micro_data = conn.execute("SELECT clean_text FROM micro_data").fetchall()
+def load_real_data(db_path="m_pulse.db", w2v_path="current_context.model"):
+    print("Locked In: Loading and Aggregating Daily Time-Series...")
+    conn = sqlite3.connect(db_path)
+    macro_df = pd.read_sql_query("SELECT published as ts, clean_text as text FROM macro_data", conn)
+    micro_df = pd.read_sql_query("SELECT created_utc as ts, clean_text as text FROM micro_data", conn)
     conn.close()
-    
-    w2v_model = Word2Vec.load(model_path)
-    macro_texts = [row[0] for row in macro_data]
-    micro_texts = [row[0] for row in micro_data]
-    
-    y_values = [len(str(m).split()) / 100.0 for m in macro_texts]
-    min_len = min(len(macro_texts), len(micro_texts))
-    macro_texts, micro_texts, y_values = macro_texts[:min_len], micro_texts[:min_len], y_values[:min_len]
-    
-    X_macro = text_to_vector_seq(macro_texts, w2v_model, 104)
-    X_micro = text_to_vector_seq(micro_texts, w2v_model, 60)
-    Y = np.array(y_values).reshape(-1, 1)
-    
-    return torch.tensor(X_macro, dtype=torch.float32), torch.tensor(X_micro, dtype=torch.float32), torch.tensor(Y, dtype=torch.float32)
 
-def run_experiment(run_type, use_macro, use_micro, X_macro, X_micro, Y, max_epochs=500, patience=15):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = os.path.join("runs", f"{run_type}_{timestamp}")
+    # Standardize Dates
+    macro_df['date'] = pd.to_datetime(macro_df['ts'], errors='coerce').dt.date
+    micro_df['date'] = pd.to_datetime(micro_df['ts'], unit='s', errors='coerce').dt.date
+    
+    w2v_model = Word2Vec.load(w2v_path)
+    
+    # 1. Aggregate daily volume and text
+    daily_micro = micro_df.groupby('date')['text'].apply(list).to_dict()
+    daily_macro = macro_df.groupby('date')['text'].apply(list).to_dict()
+    
+    all_dates = sorted(list(set(daily_micro.keys()) | set(daily_macro.keys())))
+    
+    # 2. Build Daily Vectors and Targets
+    day_vecs_mic = []
+    day_vecs_mac = []
+    raw_volumes = []
+    
+    last_mac = np.zeros(w2v_model.vector_size)
+    decay_rate = 0.8  # News impact decays by 20% each day without new news
+    
+    for d in all_dates:
+        # Micro is typically dense
+        day_vecs_mic.append(get_day_vector(daily_micro.get(d, []), w2v_model))
+        
+        # Macro is sparse, apply EMA/forward fill to smooth it out
+        mac_vec = get_day_vector(daily_macro.get(d, []), w2v_model)
+        if np.count_nonzero(mac_vec) == 0:
+            mac_vec = last_mac * decay_rate
+        else:
+            # Combine new news with lingering old news
+            mac_vec = mac_vec + (last_mac * decay_rate)
+            last_mac = mac_vec
+        day_vecs_mac.append(mac_vec)
+        
+        # Target: Log of daily post count 
+        raw_volumes.append(np.log1p(len(daily_micro.get(d, []))))
+
+    # Smooth the target volume to remove artificial spikes (e.g. last 48 hours)
+    # Using a 3-day rolling average
+    smooth_volumes = pd.Series(raw_volumes).rolling(window=3, min_periods=1).mean().tolist()
+
+    # 3. Create Sliding Window (7-day lookback to predict day 8)
+    window = 7
+    X_mac, X_mic, Y = [], [], []
+    
+    for i in range(window, len(all_dates)):
+        X_mac.append(day_vecs_mac[i-window:i])
+        X_mic.append(day_vecs_mic[i-window:i])
+        Y.append(smooth_volumes[i])
+        
+    print(f"✅ Created {len(Y)} daily time-steps for training.")
+    
+    return (torch.tensor(np.array(X_mac), dtype=torch.float32), 
+            torch.tensor(np.array(X_mic), dtype=torch.float32), 
+            torch.tensor(np.array(Y), dtype=torch.float32).view(-1, 1),
+            window)
+
+def run_final_dual_stream():
+    # Setup
+    run_id = f"FINAL_LOCKED_IN_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_dir = os.path.join("runs", run_id)
     os.makedirs(run_dir, exist_ok=True)
     
-    # Move model to device
-    model = MPulseNet(use_macro=use_macro, use_micro=use_micro).to(device)
+    X_mac, X_mic, Y, win_size = load_real_data()
+    
+    # Dynamic Model Creation
+    model = MPulseNet(macro_seq_len=win_size, micro_seq_len=win_size).to(device)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     
-    split_idx = int(len(Y) * 0.8)
-    # Move data to device
-    X_mac_train, X_mac_test = X_macro[:split_idx].to(device), X_macro[split_idx:].to(device)
-    X_mic_train, X_mic_test = X_micro[:split_idx].to(device), X_micro[split_idx:].to(device)
-    Y_train, Y_test = Y[:split_idx].to(device), Y[split_idx:].to(device)
+    # Train/Test Split (Time-series aware)
+    split = int(len(Y) * 0.8)
+    X_mac_tr, X_mac_te = X_mac[:split].to(device), X_mac[split:].to(device)
+    X_mic_tr, X_mic_te = X_mic[:split].to(device), X_mic[split:].to(device)
+    Y_tr, Y_te = Y[:split].to(device), Y[split:].to(device)
     
-    best_val_loss = float('inf')
-    patience_counter = 0
-    train_losses, val_losses = [], []
-    
-    # Reset VRAM peak tracking
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-    
-    print(f"Starting {run_type} on {device}...")
-    for epoch in range(max_epochs):
-        start_time = time.time()
+    print(f"🚀 Training Dual-Stream on GPU ({device})...")
+    for epoch in range(200):
         model.train()
         optimizer.zero_grad()
-        outputs = model(X_mac_train, X_mic_train)
-        loss = criterion(outputs, Y_train)
+        loss = criterion(model(X_mac_tr, X_mic_tr), Y_tr)
         loss.backward()
         optimizer.step()
-        
-        model.eval()
-        with torch.no_grad():
-            val_outputs = model(X_mac_test, X_mic_test)
-            val_loss = criterion(val_outputs, Y_test)
-        
-        epoch_time = time.time() - start_time
-        train_losses.append(loss.item())
-        val_losses.append(val_loss.item())
-        
-        # Accurate VRAM Tracking
-        vram = torch.cuda.max_memory_allocated(device) / (1024**3) if torch.cuda.is_available() else 0.01
-        log_telemetry(run_type, epoch + 1, loss.item(), val_loss.item(), vram, epoch_time)
-        
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(run_dir, "best_model.pt"))
-        else:
-            patience_counter += 1
-            
-        if patience_counter >= patience:
-            print(f"  Early Stopping at epoch {epoch+1}")
-            break
-            
-        if (epoch + 1) % 20 == 0:
-            print(f"  Epoch [{epoch+1}/{max_epochs}], Loss: {loss.item():.6f}, Val Loss: {val_loss.item():.6f}")
+        if (epoch+1) % 50 == 0:
+            print(f"  Epoch [{epoch+1}/200] | Loss: {loss.item():.6f}")
 
-    # Final Evaluation
-    model.load_state_dict(torch.load(os.path.join(run_dir, "best_model.pt")))
+    # Eval
     model.eval()
     with torch.no_grad():
-        predictions = model(X_mac_test, X_mic_test).cpu().numpy().flatten()
+        preds = model(X_mac_te, X_mic_te).cpu().numpy().flatten()
     
-    mse = mean_squared_error(Y_test.cpu().numpy().flatten(), predictions)
+    mse = mean_squared_error(Y_te.cpu().numpy().flatten(), preds)
     
-    plt.figure(figsize=(10, 5))
-    plt.plot(train_losses, label='Train Loss')
-    plt.plot(val_losses, label='Val Loss')
-    plt.title(f"Learning Curve: {run_type}")
-    plt.legend()
-    plt.savefig(os.path.join(run_dir, "learning_curve.png"))
-    plt.close()
-
-    return predictions, mse, run_dir, split_idx
-
-# Execution
-os.makedirs("runs", exist_ok=True)
-init_telemetry()
-
-try:
-    X_macro, X_micro, Y = load_real_data()
-    print(f"Real data loaded: {len(Y)} samples.")
-    
-    results = {}
-    for r_type, macro, micro in [("Micro_Only", False, True), ("Macro_Only", True, False), ("Dual_Stream", True, True)]:
-        results[r_type] = run_experiment(r_type, macro, micro, X_macro, X_micro, Y)
-        
-    # Comparison Graph
-    plt.figure(figsize=(14, 7))
+    # Final Organized Saving
+    plt.figure(figsize=(12,6))
     actuals = Y.numpy().flatten()
-    plt.plot(actuals, label='Actual Intensity', color='black', alpha=0.3)
-    s_idx = results['Dual_Stream'][3]
-    plt.axvline(x=s_idx, color='red', linestyle='--', label='Cutoff')
+    plt.plot(actuals, label='Actual Daily Log-Volume', color='black', alpha=0.4)
+    padded_preds = np.full(len(actuals), np.nan)
+    padded_preds[split:] = preds
+    plt.plot(padded_preds, label=f'M-PULSE Forecast (MSE: {mse:.4f})', color='green', linewidth=2)
+    plt.axvline(x=split, color='red', linestyle='--', label='Forecast Cutoff')
+    plt.title("M-PULSE Final Result: Daily Aggregated Forecasting")
+    plt.legend(); plt.grid(True, alpha=0.2)
+    plt.savefig(os.path.join(run_dir, "final_forecast.png"))
+    plt.savefig("final_forecast_root.png") # Also in root for easy viewing
     
-    for name, (pred, mse, r_dir, _) in results.items():
-        padded = np.full(len(actuals), np.nan)
-        padded[s_idx:] = pred
-        plt.plot(padded, label=f"{name} (MSE: {mse:.4f})")
-    
-    plt.title("M-PULSE Final Results: Real-World Text Data on GPU")
-    plt.legend()
-    plt.savefig("real_data_gpu_results.png")
-    print("\nSUCCESS: Pipeline verified with real data on GPU hardware.")
-except Exception as e:
-    print(f"ERROR: {e}")
+    torch.save(model.state_dict(), os.path.join(run_dir, "model.pt"))
+    print(f"\n✅ FINAL RUN COMPLETE. See: {run_dir}")
+    print(f"MSE: {mse:.6f}")
+
+if __name__ == "__main__":
+    run_final_dual_stream()
