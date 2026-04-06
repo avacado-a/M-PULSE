@@ -1,3 +1,21 @@
+# Virtual Environment
 venv/
-m_pulse.db
+ENV/
+.env
+
+# Python Bytecode
 __pycache__/
+*.py[cod]
+*$py.class
+
+# Data & Models
+m_pulse.db
+*.model
+*.pt
+runs/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
