@@ -75,7 +75,7 @@ def load_real_data(topic, db_path="m_pulse.db", w2v_path="current_context.model"
     # Smoothing applied to handle social media volatility spikes (Trend #3 Proof)
     smooth_volumes = pd.Series(raw_volumes).rolling(window=2, min_periods=1).mean().tolist()
 
-    # Dynamic 3-Day Windowing Strategy (Optimized for Sparse Real-World Data)
+    # Temporal Windowing Strategy
     window = 3 
     X_mac, X_mic, Y = [], [], []
     for i in range(window, len(all_dates)):
@@ -84,7 +84,7 @@ def load_real_data(topic, db_path="m_pulse.db", w2v_path="current_context.model"
         Y.append(smooth_volumes[i])
         
     Y_arr = np.array(Y, dtype=np.float32)
-    # Aggressive Min-Max Normalization Protocol
+    # Min-Max Normalization Protocol
     if Y_arr.max() > Y_arr.min():
         Y_arr = (Y_arr - Y_arr.min()) / (Y_arr.max() - Y_arr.min())
     else:
@@ -108,7 +108,7 @@ def run_ablation_experiment(name, use_mac, use_mic, X_mac, X_mic, Y, split):
     X_mic_tr, X_mic_te = X_mic[:split].to(device), X_mic[split:].to(device)
     Y_tr, Y_te = Y[:split].to(device), Y[split:].to(device)
     
-    # Accelerated Convergence Protocol
+    # Convergence Loop
     for epoch in range(250):
         model.train(); optimizer.zero_grad()
         loss = criterion(model(X_mac_tr, X_mic_tr), Y_tr)
