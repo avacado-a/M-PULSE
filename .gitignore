@@ -12,7 +12,9 @@ __pycache__/
 m_pulse.db
 *.model
 *.pt
-runs/
+
+# Outputs
+results/
 
 # IDE & OS
 .vscode/
